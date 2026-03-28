@@ -123,8 +123,7 @@ runs:
         if [ -f buf.gen.yaml ]; then
           buf generate
         else
-          echo "::error::No buf.gen.yaml found"
-          exit 1
+          echo "No buf.gen.yaml found, skipping protobuf generation"
         fi
 
     - name: Create SDK packages
