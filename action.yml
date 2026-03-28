@@ -1,0 +1,195 @@
+name: 'Protobuf Release Build'
+description: 'Generate protobuf code and SDK packages for release'
+author: 'jdfalk'
+
+inputs:
+  config-path:
+    description: 'Path to the repository configuration file'
+    required: false
+    default: '.github/repository-config.yml'
+  protobuf-path:
+    description: 'Path to protobuf source files'
+    required: false
+    default: 'proto'
+  output-path:
+    description: 'Output path for generated code'
+    required: false
+    default: 'sdks'
+  generate-docs:
+    description: 'Generate protobuf documentation'
+    required: false
+    default: 'false'
+  skip-post-processing:
+    description: 'Skip post-generation processing scripts'
+    required: false
+    default: 'false'
+  buf-version:
+    description: 'Buf CLI version'
+    required: false
+    default: '1.50.0'
+  protoc-version:
+    description: 'protoc version'
+    required: false
+    default: '28.3'
+  go-enabled:
+    description: 'Generate Go protobuf code'
+    required: false
+    default: 'true'
+  python-enabled:
+    description: 'Generate Python protobuf code'
+    required: false
+    default: 'true'
+  rust-enabled:
+    description: 'Generate Rust protobuf code'
+    required: false
+    default: 'false'
+
+outputs:
+  artifacts-available:
+    description: 'Whether protobuf artifacts were generated'
+    value: ${{ steps.check-artifacts.outputs.artifacts-available }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Go
+      if: inputs.go-enabled == 'true'
+      uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+      with:
+        go-version: '1.23'
+        cache: false
+
+    - name: Set up Python
+      if: inputs.python-enabled == 'true'
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: '3.13'
+
+    - name: Set up Rust
+      if: inputs.rust-enabled == 'true'
+      uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+
+    - name: Install protoc
+      shell: bash
+      env:
+        PROTOC_VERSION: ${{ inputs.protoc-version }}
+      run: |
+        curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+        unzip -q "protoc-${PROTOC_VERSION}-linux-x86_64.zip" -d protoc
+        sudo mv protoc/bin/protoc /usr/local/bin/
+        sudo mv protoc/include/* /usr/local/include/
+        sudo chmod +x /usr/local/bin/protoc
+        rm -rf protoc "protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+        protoc --version
+
+    - name: Set up Buf
+      uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+      with:
+        version: ${{ inputs.buf-version }}
+        github_token: ${{ github.token }}
+
+    - name: Install Go protobuf plugins
+      if: inputs.go-enabled == 'true'
+      shell: bash
+      run: |
+        go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+        go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+    - name: Install Python protobuf plugins
+      if: inputs.python-enabled == 'true'
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install grpcio-tools mypy-protobuf
+
+    - name: Install Rust protobuf plugins
+      if: inputs.rust-enabled == 'true'
+      shell: bash
+      run: |
+        cargo install protobuf-codegen
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - name: Lint protobuf files
+      shell: bash
+      run: |
+        if [ -f buf.yaml ]; then
+          buf lint
+        fi
+
+    - name: Generate protobuf code
+      shell: bash
+      run: |
+        if [ -f buf.gen.yaml ]; then
+          buf generate
+        else
+          echo "::error::No buf.gen.yaml found"
+          exit 1
+        fi
+
+    - name: Create SDK packages
+      shell: bash
+      env:
+        OUTPUT_PATH: ${{ inputs.output-path }}
+      run: |
+        if [ -d "$OUTPUT_PATH/go" ]; then
+          cd "$OUTPUT_PATH/go" && tar -czf "../../gcommon-go-sdk.tar.gz" . && zip -r "../../gcommon-go-sdk.zip" . && cd ../..
+        fi
+        if [ -d "$OUTPUT_PATH/python" ]; then
+          cd "$OUTPUT_PATH/python" && tar -czf "../../gcommon-python-sdk.tar.gz" . && zip -r "../../gcommon-python-sdk.zip" . && cd ../..
+        fi
+        if [ -d "proto-docs" ]; then
+          tar -czf gcommon-docs.tar.gz proto-docs/
+          zip -r gcommon-docs.zip proto-docs/
+        fi
+
+    - name: Run post-generation processing
+      if: inputs.skip-post-processing != 'true'
+      shell: bash
+      run: |
+        for script in scripts/post-buf-generate.py scripts/setup-go-modules.py scripts/setup-python-sdk.py; do
+          if [ -f "$script" ]; then
+            python3 "$script"
+          fi
+        done
+
+    - name: Generate documentation
+      if: inputs.generate-docs == 'true'
+      shell: bash
+      run: |
+        if [ -f scripts/generate_proto_docs.py ]; then
+          python3 scripts/generate_proto_docs.py
+        fi
+
+    - name: Upload protobuf artifacts
+      if: always()
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      with:
+        name: protobuf-generated
+        path: |
+          gcommon-go-sdk.tar.gz
+          gcommon-go-sdk.zip
+          gcommon-python-sdk.tar.gz
+          gcommon-python-sdk.zip
+          gcommon-docs.tar.gz
+          gcommon-docs.zip
+          ${{ inputs.output-path }}/**/*.pb.go
+          ${{ inputs.output-path }}/**/*_grpc.pb.go
+          ${{ inputs.output-path }}/**/*.py
+          ${{ inputs.output-path }}/**/*.pyi
+          ${{ inputs.output-path }}/**/*.rs
+          proto-docs/**/*.md
+        if-no-files-found: ignore
+        retention-days: 30
+
+    - name: Check generated artifacts
+      id: check-artifacts
+      shell: bash
+      env:
+        OUTPUT_PATH: ${{ inputs.output-path }}
+      run: |
+        if [ -d "$OUTPUT_PATH" ] && find "$OUTPUT_PATH" -type f | head -1 | grep -q .; then
+          echo "artifacts-available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "artifacts-available=false" >> "$GITHUB_OUTPUT"
+        fi
